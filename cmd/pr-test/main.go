@@ -114,11 +114,33 @@ func main() {
 
 	client := github.NewClient(tc)
 
-	pullUrl := flag.Arg(0)
+	arg0 := flag.Arg(0)
+
+	pullUrl, err := getPullUrlFromCmdArg(arg0)
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	err = installPR(client, pullUrl)
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func getPullUrlFromCmdArg(arg string) (string, error) {
+	//num, err := strconv.Atoi(arg)
+	//if err == nil {
+	//
+	//}
+	reg := regexp.MustCompile(`(\S+)#(\d+)`)
+	match := reg.FindStringSubmatch(arg)
+	if match != nil {
+		repo := match[1]
+		num := match[2]
+		pullUrl := fmt.Sprintf("https://github.com/linuxdeepin/%s/pull/%s", repo, num)
+		return pullUrl, nil
+	}
+	return arg, nil
 }
 
 func getSuccessStatus(statuses []*github.RepoStatus) *github.RepoStatus {
@@ -221,7 +243,7 @@ func installPR(client *github.Client, pullUrl string) error {
 	if err != nil {
 		return err
 	}
-	log.Println(repo, prNum)
+	log.Printf("repo: %v, num: %v\n", repo, prNum)
 
 	pr, _, err := client.PullRequests.Get(ctx, organization, repo, prNum)
 	if err != nil {
