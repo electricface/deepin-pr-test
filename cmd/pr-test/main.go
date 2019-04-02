@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -128,19 +129,46 @@ func main() {
 }
 
 func getPullUrlFromCmdArg(arg string) (string, error) {
-	//num, err := strconv.Atoi(arg)
-	//if err == nil {
-	//
-	//}
-	reg := regexp.MustCompile(`(\S+)#(\d+)`)
+	_, err := strconv.Atoi(arg)
+	if err == nil {
+		repo, err := getRepoFromGitConfig()
+		if err != nil {
+			return "", err
+		}
+		return buildPullUrl(repo, arg), nil
+	}
+	reg := regexp.MustCompile(`^(\S+)#(\d+)$`)
 	match := reg.FindStringSubmatch(arg)
 	if match != nil {
 		repo := match[1]
 		num := match[2]
-		pullUrl := fmt.Sprintf("https://github.com/linuxdeepin/%s/pull/%s", repo, num)
-		return pullUrl, nil
+		return buildPullUrl(repo, num), nil
 	}
 	return arg, nil
+}
+
+func buildPullUrl(repo, num string) string {
+	return fmt.Sprintf("https://github.com/%s/%s/pull/%s",
+		organization, repo, num)
+}
+
+func getRepoFromGitConfig() (string, error) {
+	out, err := sh.Command("git", "config", "--local",
+		"--get-regexp", `remote\..*\.url`).Output()
+	if err != nil {
+		return "", err
+	}
+	remotes := bytes.Split(out, []byte("\n"))
+	reg := regexp.MustCompile(fmt.Sprintf(`github.com[:/]%s/(.+)$`, organization))
+	for _, remote := range remotes {
+		match := reg.FindSubmatch(remote)
+		if match != nil {
+			repo := string(match[1])
+			repo = strings.TrimSuffix(repo, ".git")
+			return repo, nil
+		}
+	}
+	return "", errors.New("repo not found in remote urls")
 }
 
 func getSuccessStatus(statuses []*github.RepoStatus) *github.RepoStatus {
