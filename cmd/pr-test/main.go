@@ -7,7 +7,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"net/url"
 	"os"
 	"os/user"
@@ -22,6 +24,12 @@ import (
 	"github.com/levigross/grequests"
 	"golang.org/x/oauth2"
 )
+
+var flagStatus bool
+
+func init() {
+	flag.BoolVar(&flagStatus, "status", false, "")
+}
 
 const (
 	organization = "linuxdeepin"
@@ -58,7 +66,7 @@ func getUrlBasename(u *url.URL) (string, error) {
 	return base, nil
 }
 
-func installDeb(debUrl *url.URL) error {
+func installDeb(debUrl *url.URL, pkgName string) error {
 	u := debUrl.String()
 	log.Println("download from", u)
 	resp, err := grequests.Get(u, nil)
@@ -82,12 +90,14 @@ func installDeb(debUrl *url.URL) error {
 		return err
 	}
 
-	err = sh.Command("sudo", "apt", "install", "-y", "--allow-downgrades", filename).Run()
+	err = sh.Command("sudo", "apt", "install", "-y",
+		"--allow-downgrades", "--reinstall", filename).Run()
 	if err != nil {
 		return err
 	}
 
-	return nil
+	err = markInstall(pkgName)
+	return err
 }
 
 func saveDeb() {
@@ -100,56 +110,66 @@ func modifyDeb() {
 
 func main() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
-	//test()
 	flag.Parse()
+
+	if flagStatus {
+		showStatus()
+		return
+	}
+
+
 	token, err := getGithubAccessToken()
 	if err != nil {
-		log.Fatal(err)
+		log.Println("WARN: failed to get github access token:", err)
 	}
 
 	ctx := context.Background()
-	tc := oauth2.NewClient(ctx, oauth2.StaticTokenSource(
-		&oauth2.Token{
-			AccessToken: token,
-		}))
+	var httpClient *http.Client
+	if token != "" {
+		httpClient = oauth2.NewClient(ctx, oauth2.StaticTokenSource(
+			&oauth2.Token{
+				AccessToken: token,
+			}))
+	}
+	client := github.NewClient(httpClient)
 
-	client := github.NewClient(tc)
-
-	arg0 := flag.Arg(0)
-
-	pullUrl, err := getPullUrlFromCmdArg(arg0)
+	prId, err := getPRIdFromCmdArg(flag.Arg(0))
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	err = installPR(client, pullUrl)
+	err = installPullRequest(client, prId)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func getPullUrlFromCmdArg(arg string) (string, error) {
-	_, err := strconv.Atoi(arg)
+type pullRequestId struct {
+	repo string
+	num int
+}
+
+func getPRIdFromCmdArg(arg string) (pullRequestId, error) {
+	num, err := strconv.Atoi(arg)
 	if err == nil {
 		repo, err := getRepoFromGitConfig()
 		if err != nil {
-			return "", err
+			return pullRequestId{}, err
 		}
-		return buildPullUrl(repo, arg), nil
+		return pullRequestId{repo: repo, num: num}, nil
 	}
 	reg := regexp.MustCompile(`^(\S+)#(\d+)$`)
 	match := reg.FindStringSubmatch(arg)
 	if match != nil {
 		repo := match[1]
-		num := match[2]
-		return buildPullUrl(repo, num), nil
+		num, err := strconv.Atoi(match[2])
+		if err != nil {
+			return pullRequestId{}, err
+		}
+		return pullRequestId{repo: repo, num: num}, nil
 	}
-	return arg, nil
-}
 
-func buildPullUrl(repo, num string) string {
-	return fmt.Sprintf("https://github.com/%s/%s/pull/%s",
-		organization, repo, num)
+	return parsePullUrl(arg)
 }
 
 func getRepoFromGitConfig() (string, error) {
@@ -180,7 +200,7 @@ func getSuccessStatus(statuses []*github.RepoStatus) *github.RepoStatus {
 	return nil
 }
 
-func parsePullUrl(pullUrl string) (repo string, prNum int, err error) {
+func parsePullUrl(pullUrl string) (prId pullRequestId, err error) {
 	reg := regexp.MustCompile("https://github.com/" + organization + `/([^/]+)/pull/(\d+)`)
 	match := reg.FindStringSubmatch(pullUrl)
 	if match == nil {
@@ -188,8 +208,8 @@ func parsePullUrl(pullUrl string) (repo string, prNum int, err error) {
 		return
 	}
 
-	repo = match[1]
-	prNum, err = strconv.Atoi(match[2])
+	prId.repo = match[1]
+	prId.num, err = strconv.Atoi(match[2])
 	return
 }
 
@@ -265,24 +285,33 @@ func parseDebFilename(filename string) (pkgName, version, arch string, err error
 	return
 }
 
-func installPR(client *github.Client, pullUrl string) error {
-	ctx := context.Background()
-	repo, prNum, err := parsePullUrl(pullUrl)
-	if err != nil {
-		return err
-	}
-	log.Printf("repo: %v, num: %v\n", repo, prNum)
+func showPullRequestInfo(pr *github.PullRequest) {
+	title := pr.GetTitle()
+	state := pr.GetState()
+	user := pr.GetUser().GetLogin()
 
-	pr, _, err := client.PullRequests.Get(ctx, organization, repo, prNum)
+	log.Println("title:", title)
+	log.Println("state:", state)
+	log.Println("user:", user)
+}
+
+func installPullRequest(client *github.Client, prId pullRequestId) error {
+	ctx := context.Background()
+	log.Printf("repo: %v, num: %v\n", prId.repo, prId.num)
+
+	pr, _, err := client.PullRequests.Get(ctx, organization, prId.repo, prId.num)
 	if err != nil {
 		return err
 	}
+
+	showPullRequestInfo(pr)
 
 	prRef := pr.GetHead().GetSHA()
 	if prRef == "" {
 		return errors.New("failed to get pull request ref")
 	}
-	statuses, _, err := client.Repositories.ListStatuses(ctx, organization, repo, prRef, nil)
+	statuses, _, err := client.Repositories.ListStatuses(ctx, organization, prId.repo,
+		prRef, nil)
 	if err != nil {
 		return err
 	}
@@ -298,7 +327,11 @@ func installPR(client *github.Client, pullUrl string) error {
 			break
 		}
 
-		return errors.New("not found success status, please see " + targetUrl0)
+		errMsg := "not found success status"
+		if targetUrl0 != "" {
+			errMsg += ", please see " + targetUrl0
+		}
+		return errors.New(errMsg)
 	}
 
 	targetUrl := status.GetTargetURL()
@@ -342,12 +375,44 @@ func installJobDebs(jobUrl string) error {
 		}
 
 		if respYes {
-			err = installDeb(debUrl)
+			err = installDeb(debUrl, pkgName)
 			if err != nil {
 				return err
 			}
 		}
 
+	}
+	return nil
+}
+
+const markDir = "/var/lib/deepin-pr-test"
+
+func markInstall(pkg string) error {
+	_, err := os.Stat(markDir)
+	if os.IsNotExist(err) {
+		err = sh.Command("sudo", "mkdir", "-p", "-m", "0755", markDir).Run()
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	err = sh.Command("sudo", "touch", filepath.Join(markDir, pkg)).Run()
+	return err
+}
+
+func markUninstall(pkg string) error {
+	// TODO
+	return nil
+}
+
+func showStatus() error {
+	fileInfos, err := ioutil.ReadDir(markDir)
+	if err != nil {
+		return err
+	}
+	for _, fileInfo := range fileInfos {
+		log.Println(fileInfo.Name())
 	}
 	return nil
 }
