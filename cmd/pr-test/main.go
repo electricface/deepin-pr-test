@@ -20,9 +20,11 @@ import (
 	"strings"
 
 	"github.com/codeskyblue/go-sh"
+	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-github/github"
 	"github.com/levigross/grequests"
 	"golang.org/x/oauth2"
+	"pault.ag/go/debian/control"
 )
 
 var flagStatus bool
@@ -90,8 +92,13 @@ func installDeb(debUrl *url.URL, pkgName string) error {
 		return err
 	}
 
+	modifiedFilename, err := modifyDeb(filename)
+	if err != nil {
+		return err
+	}
+
 	err = sh.Command("sudo", "apt", "install", "-y",
-		"--allow-downgrades", "--reinstall", filename).Run()
+		"--allow-downgrades", "--reinstall", modifiedFilename).Run()
 	if err != nil {
 		return err
 	}
@@ -104,8 +111,134 @@ func saveDeb() {
 
 }
 
-func modifyDeb() {
+func modifyDeb(filename string) (modifiedFilename string, err error) {
+	modifiedFilename = filepath.Join(tempDebModifiedDir, filepath.Base(filename))
+	log.Println("modifiedFilename:", modifiedFilename)
 
+	err = os.MkdirAll(tempDebModifiedDir, 0755)
+	if err != nil {
+		return
+	}
+
+	err = sh.Command("cp", filename, modifiedFilename).Run()
+	if err != nil {
+		return
+	}
+
+	tempDir, err := ioutil.TempDir("", "pr-test-mod")
+	if err != nil {
+		return
+	}
+	log.Println("tempDir:", tempDir)
+	defer func() {
+		err := os.RemoveAll(tempDir)
+		if err != nil {
+			log.Println("WARN:", err)
+		}
+	}()
+
+	arFiles, err := getArFiles(modifiedFilename)
+	if err != nil {
+		return
+	}
+
+	var controlTarFile string
+	var tarExt string
+	for _, file := range arFiles {
+		if strings.HasPrefix(file, "control.tar") {
+			controlTarFile = file
+			tarExt = filepath.Ext(file)
+		}
+	}
+
+	if controlTarFile == "" {
+		err = errors.New("not found control tar file in deb file")
+		return
+	}
+
+	session := sh.NewSession().SetDir(tempDir)
+	err = session.Command("ar", "x", modifiedFilename, controlTarFile).Run()
+	if err != nil {
+		return
+	}
+
+	switch tarExt {
+	case ".gz":
+		err = session.Command("gunzip", controlTarFile).Run()
+	case ".xz":
+		err = session.Command("xz", "-d", controlTarFile).Run()
+	default:
+		err = fmt.Errorf("unknown control.tar ext %q", tarExt)
+	}
+	if err != nil {
+		return
+	}
+
+	err = session.Command("tar", "--extract", "--file=control.tar", "./control").Run()
+	if err != nil {
+		return
+	}
+
+	err = modifyControl(filepath.Join(tempDir, "control"))
+	if err != nil {
+		return
+	}
+
+	// rebuild deb
+	err = session.Command("tar", "--update", "-f", "control.tar", "./control").Run()
+	if err != nil {
+		return
+	}
+
+	switch tarExt {
+	case ".gz":
+		err = session.Command("gzip", "control.tar").Run()
+	case ".xz":
+		err = session.Command("xz", "-z", "control.tar").Run()
+	}
+	if err != nil {
+		return
+	}
+
+	err = session.Command("ar", "r", modifiedFilename, controlTarFile).Run()
+	if err != nil {
+		return
+	}
+
+	return
+}
+
+func modifyControl(filename string) error {
+	ctl, err := control.ParseControlFile(filename)
+	if err != nil {
+		return err
+	}
+
+	spew.Dump(ctl)
+
+	// TODO
+	//ctl.Source.Description
+
+	return nil
+}
+
+func getArFiles(filename string) ([]string, error) {
+	arTOut, err := sh.Command("ar", "t", filename).Output()
+	if err != nil {
+		return nil, err
+	}
+
+	lines := bytes.Split(arTOut, []byte("\n"))
+	var files []string
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+
+		files = append(files, string(line))
+	}
+	return files, nil
 }
 
 func main() {
@@ -116,7 +249,6 @@ func main() {
 		showStatus()
 		return
 	}
-
 
 	token, err := getGithubAccessToken()
 	if err != nil {
@@ -146,7 +278,7 @@ func main() {
 
 type pullRequestId struct {
 	repo string
-	num int
+	num  int
 }
 
 func getPRIdFromCmdArg(arg string) (pullRequestId, error) {
