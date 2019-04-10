@@ -13,7 +13,6 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
-	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -29,33 +28,18 @@ import (
 )
 
 var flagStatus bool
+var flagVerbose bool
+var flagRestore string
 
 func init() {
 	flag.BoolVar(&flagStatus, "status", false, "")
+	flag.BoolVar(&flagVerbose, "verbose", false, "")
+	flag.StringVar(&flagRestore, "restore", "", "all|$repo|$user")
 }
 
 const (
 	organization = "linuxdeepin"
-)
 
-func getHome() (string, error) {
-	home := os.Getenv("HOME")
-	if home != "" {
-		return home, nil
-	}
-	u, err := user.Current()
-	if err != nil {
-		return "", err
-	}
-	return u.HomeDir, nil
-}
-
-func test() {
-	//jobUrl := "https://ci.deepin.io/job/dde-file-manager/5981/"
-	os.Exit(1)
-}
-
-const (
 	tempDebDownloadDir = "/tmp/pr-test/deb_download"
 	tempDebModifiedDir = "/tmp/pr-test/deb_modified"
 )
@@ -111,13 +95,9 @@ func installDeb(debUrl *url.URL, pkgName string, detail *jobDetail) error {
 	return err
 }
 
-func saveDeb() {
-
-}
-
 func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err error) {
 	modifiedFilename = filepath.Join(tempDebModifiedDir, filepath.Base(filename))
-	log.Println("modifiedFilename:", modifiedFilename)
+	logDebugln("modifiedFilename:", modifiedFilename)
 
 	err = os.MkdirAll(tempDebModifiedDir, 0755)
 	if err != nil {
@@ -133,7 +113,7 @@ func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err
 	if err != nil {
 		return
 	}
-	log.Println("tempDir:", tempDir)
+	logDebugln("tempDir:", tempDir)
 	defer func() {
 		err := os.RemoveAll(tempDir)
 		if err != nil {
@@ -166,10 +146,14 @@ func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err
 		return
 	}
 
+	const (
+		extGz = ".gz"
+		extXz = ".xz"
+	)
 	switch tarExt {
-	case ".gz":
+	case extGz:
 		err = session.Command("gunzip", controlTarFile).Run()
-	case ".xz":
+	case extXz:
 		err = session.Command("xz", "-d", controlTarFile).Run()
 	default:
 		err = fmt.Errorf("unknown control.tar ext %q", tarExt)
@@ -195,9 +179,9 @@ func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err
 	}
 
 	switch tarExt {
-	case ".gz":
+	case extGz:
 		err = session.Command("gzip", "control.tar").Run()
-	case ".xz":
+	case extXz:
 		err = session.Command("xz", "-z", "control.tar").Run()
 	}
 	if err != nil {
@@ -268,32 +252,14 @@ func modifyControl(filename string, detail *debDetail) error {
 		return err
 	}
 
-	// debug
-	err = srcParagraph.WriteTo(os.Stdout)
-	if err != nil {
-		return err
+	if flagVerbose {
+		err = srcParagraph.WriteTo(os.Stdout)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
-}
-
-func getArFiles(filename string) ([]string, error) {
-	arTOut, err := sh.Command("ar", "t", filename).Output()
-	if err != nil {
-		return nil, err
-	}
-
-	lines := bytes.Split(arTOut, []byte("\n"))
-	var files []string
-	for _, line := range lines {
-		line = bytes.TrimSpace(line)
-		if len(line) == 0 {
-			continue
-		}
-
-		files = append(files, string(line))
-	}
-	return files, nil
 }
 
 func main() {
@@ -301,7 +267,16 @@ func main() {
 	flag.Parse()
 
 	if flagStatus {
-		showStatus()
+		err := showStatus()
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	} else if flagRestore != "" {
+		err := restore(flagRestore)
+		if err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 
@@ -623,38 +598,71 @@ func markUninstall(pkg string) error {
 }
 
 func showStatus() error {
-	fileInfos, err := ioutil.ReadDir(markDir)
+	all, err := getAllPkgInstallDetails()
 	if err != nil {
 		return err
 	}
-	for _, fileInfo := range fileInfos {
-		err = showPkgStatus(fileInfo.Name())
-		if err != nil {
-			return err
-		}
+
+	for _, detail := range all {
+		fmt.Println("Repo:", detail["PR_REPO"])
+		fmt.Println("Package:", detail["pkgs"])
+		fmt.Println("Title:", detail["PR_TITLE"])
+		fmt.Println("User:", detail["PR_USER"])
+		fmt.Println("PR url:", detail["PR_URL"])
+		fmt.Println("Job url:", detail["CI_URL"], "\n")
 	}
 	return nil
 }
 
-func showPkgStatus(pkg string) error {
+func getAllPkgInstallDetails() (allDetails map[string]map[string]string, err error) {
+	fileInfos, err := ioutil.ReadDir(markDir)
+	if err != nil {
+		return
+	}
+	allDetails = make(map[string]map[string]string)
+	for _, fileInfo := range fileInfos {
+		pkg := fileInfo.Name()
+		var detail map[string]string
+		detail, err = getPkgInstallDetail(pkg)
+		if err != nil {
+			return
+		}
+
+		key := detail["CI_URL"]
+		if key == "" {
+			continue
+		}
+		v, ok := allDetails[key]
+		if ok {
+			v["pkgs"] = v["pkgs"] + " " + pkg
+		} else {
+			detail["pkgs"] = pkg
+			allDetails[key] = detail
+		}
+	}
+	return
+}
+
+func getPkgInstallDetail(pkg string) (detail map[string]string, err error) {
 	out, err := sh.Command("dpkg-query", "-f", `${db:Status-Status}\n${Description}\n`, "--show", pkg).CombinedOutput()
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == 1 {
-				return nil
+				err = nil
+				return
 			}
 		}
-		return err
+		return
 	}
 
 	lines := bytes.Split(out, []byte{'\n'})
 	status := string(lines[0])
 	if status != "installed" {
-		return nil
+		return
 	}
 
 	var begin bool
-	dict := make(map[string]string, 9)
+	detail = make(map[string]string, 9)
 	for _, line := range lines {
 		line = bytes.TrimSpace(line)
 		if !begin {
@@ -674,17 +682,31 @@ func showPkgStatus(pkg string) error {
 
 			key := string(fields[0])
 			value := string(fields[1])
-			dict[key] = value
+			detail[key] = value
 		}
 	}
+	return
+}
 
-	if len(dict) == 0 {
-		return nil
+func restore(pattern string) error {
+	all, err := getAllPkgInstallDetails()
+	if err != nil {
+		return err
 	}
-	fmt.Println("Package:", pkg)
-	fmt.Println("Title:", dict["PR_TITLE"])
-	fmt.Println("User:", dict["PR_USER"])
-	fmt.Println("PR Url:", dict["PR_URL"])
-	fmt.Println("Job Url:", dict["CI_URL"], "\n")
-	return nil
+
+	var pkgs string
+	for _, detail := range all {
+		if pattern == "all" ||
+			detail["PR_REPO"] == pattern ||
+			detail["PR_USER"] == pattern {
+
+			pkgs = pkgs + " " + detail["pkgs"]
+		}
+	}
+	fmt.Println("restore", pkgs)
+
+	// TODO mark uninstall
+
+	err = sh.Command("sh", "-c", "sudo apt-get install "+pkgs).Run()
+	return err
 }
