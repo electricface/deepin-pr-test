@@ -12,15 +12,16 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/user"
 	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/codeskyblue/go-sh"
-	"github.com/davecgh/go-spew/spew"
 	"github.com/google/go-github/github"
 	"github.com/levigross/grequests"
 	"golang.org/x/oauth2"
@@ -68,7 +69,7 @@ func getUrlBasename(u *url.URL) (string, error) {
 	return base, nil
 }
 
-func installDeb(debUrl *url.URL, pkgName string) error {
+func installDeb(debUrl *url.URL, pkgName string, detail *jobDetail) error {
 	u := debUrl.String()
 	log.Println("download from", u)
 	resp, err := grequests.Get(u, nil)
@@ -92,7 +93,10 @@ func installDeb(debUrl *url.URL, pkgName string) error {
 		return err
 	}
 
-	modifiedFilename, err := modifyDeb(filename)
+	modifiedFilename, err := modifyDeb(filename, &debDetail{
+		url:       u,
+		jobDetail: detail,
+	})
 	if err != nil {
 		return err
 	}
@@ -111,7 +115,7 @@ func saveDeb() {
 
 }
 
-func modifyDeb(filename string) (modifiedFilename string, err error) {
+func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err error) {
 	modifiedFilename = filepath.Join(tempDebModifiedDir, filepath.Base(filename))
 	log.Println("modifiedFilename:", modifiedFilename)
 
@@ -179,7 +183,7 @@ func modifyDeb(filename string) (modifiedFilename string, err error) {
 		return
 	}
 
-	err = modifyControl(filepath.Join(tempDir, "control"))
+	err = modifyControl(filepath.Join(tempDir, "control"), detail)
 	if err != nil {
 		return
 	}
@@ -208,16 +212,67 @@ func modifyDeb(filename string) (modifiedFilename string, err error) {
 	return
 }
 
-func modifyControl(filename string) error {
+func modifyControl(filename string, detail *debDetail) error {
 	ctl, err := control.ParseControlFile(filename)
 	if err != nil {
 		return err
 	}
 
-	spew.Dump(ctl)
+	srcParagraph := ctl.Source
 
-	// TODO
-	//ctl.Source.Description
+	var descBuf bytes.Buffer
+	descBuf.WriteString(srcParagraph.Description)
+	descBuf.WriteString("The following information is added by deepin-pr-test\n=begin\n")
+	prDetail := detail.jobDetail.prDetail
+	parts := []string{
+		"PR_URL", prDetail.url,
+		"PR_REPO", prDetail.repo,
+		"PR_NUM", strconv.Itoa(prDetail.num),
+		"PR_USER", prDetail.user,
+		"PR_TITLE", prDetail.title,
+		"PR_STATE", prDetail.state,
+
+		"CI_URL", detail.jobDetail.url,
+
+		"DEB_URL", detail.url,
+		"DEB_MODIFY_TIME", time.Now().Format(time.RFC3339),
+	}
+	for i := 0; i < len(parts); i += 2 {
+		descBuf.WriteString(parts[i])
+		descBuf.WriteByte('=')
+		descBuf.WriteString(parts[i+1])
+		descBuf.WriteByte('\n')
+	}
+	// NOTE: paragraph 的 Description 不能以 \n 结尾。
+	descBuf.WriteString("=end")
+	srcParagraph.Set("Description", descBuf.String())
+
+	f, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err = f.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}()
+
+	bw := bufio.NewWriter(f)
+	err = srcParagraph.WriteTo(bw)
+	if err != nil {
+		return err
+	}
+	err = bw.Flush()
+	if err != nil {
+		return err
+	}
+
+	// debug
+	err = srcParagraph.WriteTo(os.Stdout)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -427,6 +482,24 @@ func showPullRequestInfo(pr *github.PullRequest) {
 	log.Println("user:", user)
 }
 
+type debDetail struct {
+	url       string
+	jobDetail *jobDetail
+}
+
+type jobDetail struct {
+	url      string
+	prDetail *pullRequestDetail
+}
+
+type pullRequestDetail struct {
+	pullRequestId
+	url   string
+	user  string
+	title string
+	state string
+}
+
 func installPullRequest(client *github.Client, prId pullRequestId) error {
 	ctx := context.Background()
 	log.Printf("repo: %v, num: %v\n", prId.repo, prId.num)
@@ -473,11 +546,11 @@ func installPullRequest(client *github.Client, prId pullRequestId) error {
 
 	log.Println("targetUrl:", targetUrl)
 
-	err = installJobDebs(strings.TrimSuffix(targetUrl, "/console"))
+	err = installJobDebs(strings.TrimSuffix(targetUrl, "/console"), pr)
 	return err
 }
 
-func installJobDebs(jobUrl string) error {
+func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 	debUrls, err := getDebUrls(jobUrl)
 	if err != nil {
 		return err
@@ -507,7 +580,18 @@ func installJobDebs(jobUrl string) error {
 		}
 
 		if respYes {
-			err = installDeb(debUrl, pkgName)
+			prDetail := new(pullRequestDetail)
+			prDetail.num = pr.GetNumber()
+			prDetail.repo = pr.GetBase().GetRepo().GetName()
+			prDetail.url = pr.GetHTMLURL()
+			prDetail.user = pr.GetUser().GetLogin()
+			prDetail.title = pr.GetTitle()
+			prDetail.state = pr.GetState()
+			jobDetail := &jobDetail{
+				url:      jobUrl,
+				prDetail: prDetail,
+			}
+			err = installDeb(debUrl, pkgName, jobDetail)
 			if err != nil {
 				return err
 			}
@@ -544,7 +628,63 @@ func showStatus() error {
 		return err
 	}
 	for _, fileInfo := range fileInfos {
-		log.Println(fileInfo.Name())
+		err = showPkgStatus(fileInfo.Name())
+		if err != nil {
+			return err
+		}
 	}
+	return nil
+}
+
+func showPkgStatus(pkg string) error {
+	out, err := sh.Command("dpkg-query", "-f", `${db:Status-Status}\n${Description}\n`, "--show", pkg).CombinedOutput()
+	if err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			if exitErr.ExitCode() == 1 {
+				return nil
+			}
+		}
+		return err
+	}
+
+	lines := bytes.Split(out, []byte{'\n'})
+	status := string(lines[0])
+	if status != "installed" {
+		return nil
+	}
+
+	var begin bool
+	dict := make(map[string]string, 9)
+	for _, line := range lines {
+		line = bytes.TrimSpace(line)
+		if !begin {
+			if bytes.Equal(line, []byte("=begin")) {
+				begin = true
+			}
+			continue
+		} else {
+			if bytes.Equal(line, []byte("=end")) {
+				break
+			}
+
+			fields := bytes.SplitN(line, []byte{'='}, 2)
+			if len(fields) != 2 {
+				continue
+			}
+
+			key := string(fields[0])
+			value := string(fields[1])
+			dict[key] = value
+		}
+	}
+
+	if len(dict) == 0 {
+		return nil
+	}
+	fmt.Println("Package:", pkg)
+	fmt.Println("Title:", dict["PR_TITLE"])
+	fmt.Println("User:", dict["PR_USER"])
+	fmt.Println("PR Url:", dict["PR_URL"])
+	fmt.Println("Job Url:", dict["CI_URL"], "\n")
 	return nil
 }
