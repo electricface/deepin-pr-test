@@ -295,15 +295,119 @@ func main() {
 	}
 	client := github.NewClient(httpClient)
 
-	prId, err := getPRIdFromCmdArg(flag.Arg(0))
-	if err != nil {
-		log.Fatal(err)
+	var prIds []pullRequestId
+	for _, arg := range flag.Args() {
+		ids, err := getPrIdsFromCmdArg(client, arg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		prIds = append(prIds, ids...)
+	}
+	// TODO uniq prIds#
+	for _, prId := range prIds {
+		err = installPullRequest(client, prId)
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
+}
+
+func getPrIdsFromCmdArg(client *github.Client, arg string) ([]pullRequestId, error) {
+	issueShortReg := regexp.MustCompile(`^@([^#]+)#(\d+)$`)
+	// match @xxx#37
+	match := issueShortReg.FindStringSubmatch(arg)
+	if match != nil {
+		repo := match[1]
+		num, err := strconv.Atoi(match[2])
+		if err != nil {
+			return nil, err
+		}
+		switch repo {
+		case "id":
+			repo = "internal-discussion"
+		case "dc":
+			repo = "developer-center"
+		}
+		arg1 := fmt.Sprintf("https://github.com/%s/%s/issues/%d", organization, repo, num)
+		fmt.Printf("%s => %s\n", arg, arg1)
+		arg = arg1
 	}
 
-	err = installPullRequest(client, prId)
-	if err != nil {
-		log.Fatal(err)
+	if strings.Contains(arg, "/issues/") {
+		return getPrIdsWithIssue(client, arg)
 	}
+	id, err := getPRIdFromCmdArg(arg)
+	if err != nil {
+		return nil, err
+	}
+	return []pullRequestId{id}, nil
+}
+
+func getPrIdsWithIssue(client *github.Client, issueUrl string) ([]pullRequestId, error) {
+	iId, err := parseIssueUrl(issueUrl)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := context.Background()
+	timeline, _, err := client.Issues.ListIssueTimeline(ctx, iId.owner, iId.repo, iId.num, &github.ListOptions{
+		PerPage: 100,
+	})
+	var repos []string
+	for _, timelineItem := range timeline {
+		if timelineItem.GetEvent() == "referenced" {
+			commitUrl := timelineItem.GetCommitURL()
+			repo := getRepoFromCommitUrl(commitUrl)
+			if repo != "" && !strSliceContains(repos, repo) {
+				repos = append(repos, repo)
+			}
+		}
+	}
+
+	var prIds []pullRequestId
+	for _, repo := range repos {
+		prId, err := getPullRequestWithIssue(client, repo, issueUrl)
+		if err != nil {
+			log.Println("WARN:", err)
+			continue
+		}
+
+		if prId != nil {
+			prIds = append(prIds, *prId)
+		}
+	}
+	return prIds, nil
+}
+
+func getRepoFromCommitUrl(commitUrl string) string {
+	reg := regexp.MustCompile(`/([^/]+)/commits/`)
+	match := reg.FindStringSubmatch(commitUrl)
+	if match == nil {
+		return ""
+	}
+	return match[1]
+}
+
+func getPullRequestWithIssue(client *github.Client, repo, issueUrl string) (prId *pullRequestId, err error) {
+	ctx := context.Background()
+	pullRequests, _, err := client.PullRequests.List(ctx, organization, repo, &github.PullRequestListOptions{
+		State: "all",
+		ListOptions: github.ListOptions{
+			PerPage: 100,
+		},
+	})
+	if err != nil {
+		return
+	}
+	for _, pr := range pullRequests {
+		if strings.Contains(pr.GetBody(), issueUrl) {
+			return &pullRequestId{
+				repo: repo,
+				num:  pr.GetNumber(),
+			}, nil
+		}
+	}
+	return
 }
 
 type pullRequestId struct {
@@ -372,6 +476,26 @@ func parsePullUrl(pullUrl string) (prId pullRequestId, err error) {
 
 	prId.repo = match[1]
 	prId.num, err = strconv.Atoi(match[2])
+	return
+}
+
+type issueId struct {
+	owner string
+	repo  string
+	num   int
+}
+
+func parseIssueUrl(issueUrl string) (iId issueId, err error) {
+	reg := regexp.MustCompile(`https://github.com/([^/]+)/([^/]+)/issues/(\d+)`)
+	match := reg.FindStringSubmatch(issueUrl)
+	if match == nil {
+		err = errors.New("invalid issue url")
+		return
+	}
+
+	iId.owner = match[1]
+	iId.repo = match[2]
+	iId.num, err = strconv.Atoi(match[3])
 	return
 }
 
