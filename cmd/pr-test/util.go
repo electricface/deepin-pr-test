@@ -10,15 +10,15 @@ import (
 	"github.com/codeskyblue/go-sh"
 )
 
-func logDebugln(v ...interface{}) {
+func debug(v ...interface{}) {
 	if flagVerbose {
-		_ = log.Output(2, fmt.Sprintln(v))
+		_ = log.Output(2, fmt.Sprintln(v...))
 	}
 }
 
-func logDebugf(format string, v ...interface{}) {
+func debugF(format string, v ...interface{}) {
 	if flagVerbose {
-		_ = log.Output(2, fmt.Sprintf(format, v))
+		_ = log.Output(2, fmt.Sprintf(format, v...))
 	}
 }
 

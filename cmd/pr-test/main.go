@@ -97,7 +97,7 @@ func installDeb(debUrl *url.URL, pkgName string, detail *jobDetail) error {
 
 func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err error) {
 	modifiedFilename = filepath.Join(tempDebModifiedDir, filepath.Base(filename))
-	logDebugln("modifiedFilename:", modifiedFilename)
+	debug("modifiedFilename:", modifiedFilename)
 
 	err = os.MkdirAll(tempDebModifiedDir, 0755)
 	if err != nil {
@@ -113,7 +113,7 @@ func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err
 	if err != nil {
 		return
 	}
-	logDebugln("tempDir:", tempDir)
+	debug("tempDir:", tempDir)
 	defer func() {
 		err := os.RemoveAll(tempDir)
 		if err != nil {
@@ -264,6 +264,7 @@ func modifyControl(filename string, detail *debDetail) error {
 
 func main() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
+	log.SetOutput(os.Stdout)
 	flag.Parse()
 
 	if flagStatus {
@@ -308,7 +309,7 @@ func main() {
 	for idx, id := range prIds {
 		prIdsStrList[idx] = id.String()
 	}
-	log.Println("found pull request:", strings.Join(prIdsStrList, ", "))
+	debug("found pull request:", strings.Join(prIdsStrList, ", "))
 	for _, prId := range prIds {
 		err = installPullRequest(client, prId)
 		if err != nil {
@@ -334,7 +335,6 @@ func getPrIdsFromCmdArg(client *github.Client, arg string) ([]pullRequestId, err
 			repo = "developer-center"
 		}
 		arg1 := fmt.Sprintf("https://github.com/%s/%s/issues/%d", organization, repo, num)
-		fmt.Printf("%s => %s\n", arg, arg1)
 		arg = arg1
 	}
 
@@ -564,14 +564,15 @@ func parseDebFilename(filename string) (pkgName, version, arch string, err error
 	return
 }
 
-func showPullRequestInfo(pr *github.PullRequest) {
+func showPullRequestInfo(prId pullRequestId, pr *github.PullRequest) {
 	title := pr.GetTitle()
 	state := pr.GetState()
 	user := pr.GetUser().GetLogin()
 
-	log.Println("title:", title)
-	log.Println("state:", state)
-	log.Println("user:", user)
+	fmt.Printf("> %s #%d\n", prId.repo, prId.num)
+	fmt.Println("title:", title)
+	fmt.Println("state:", state)
+	fmt.Println("user:", user)
 }
 
 type debDetail struct {
@@ -594,14 +595,12 @@ type pullRequestDetail struct {
 
 func installPullRequest(client *github.Client, prId pullRequestId) error {
 	ctx := context.Background()
-	log.Printf("repo: %v, num: %v\n", prId.repo, prId.num)
-
 	pr, _, err := client.PullRequests.Get(ctx, organization, prId.repo, prId.num)
 	if err != nil {
 		return err
 	}
 
-	showPullRequestInfo(pr)
+	showPullRequestInfo(prId, pr)
 
 	prRef := pr.GetHead().GetSHA()
 	if prRef == "" {
@@ -636,7 +635,7 @@ func installPullRequest(client *github.Client, prId pullRequestId) error {
 		return errors.New("target url is empty")
 	}
 
-	log.Println("targetUrl:", targetUrl)
+	debug("targetUrl:", targetUrl)
 
 	err = installJobDebs(strings.TrimSuffix(targetUrl, "/console"), pr)
 	return err
