@@ -27,13 +27,17 @@ import (
 	"pault.ag/go/debian/control"
 )
 
+var VERSION = "unknown"
+
 var flagStatus bool
 var flagVerbose bool
 var flagRestore string
+var flagVersion bool
 
 func init() {
 	flag.BoolVar(&flagStatus, "status", false, "")
 	flag.BoolVar(&flagVerbose, "verbose", false, "")
+	flag.BoolVar(&flagVersion, "version", false, "")
 	flag.StringVar(&flagRestore, "restore", "", "all|$repo|$user")
 }
 
@@ -278,6 +282,9 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
+		return
+	} else if flagVersion {
+		fmt.Println(VERSION)
 		return
 	}
 
