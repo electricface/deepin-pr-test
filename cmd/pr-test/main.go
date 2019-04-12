@@ -57,46 +57,35 @@ func getUrlBasename(u *url.URL) (string, error) {
 	return base, nil
 }
 
-func installDeb(debUrl *url.URL, pkgName string, detail *jobDetail) error {
+func saveDeb(debUrl *url.URL, detail *jobDetail) (modifiedFilename string, err error) {
 	u := debUrl.String()
-	log.Println("download from", u)
+	debug("download from", u)
 	resp, err := grequests.Get(u, nil)
 	if err != nil {
-		return err
+		return
 	}
 
 	base, err := getUrlBasename(debUrl)
 	if err != nil {
-		return err
+		return
 	}
 	filename := filepath.Join(tempDebDownloadDir, base)
 
 	err = os.MkdirAll(tempDebDownloadDir, 0755)
 	if err != nil {
-		return err
+		return
 	}
 
 	err = resp.DownloadToFile(filename)
 	if err != nil {
-		return err
+		return
 	}
 
-	modifiedFilename, err := modifyDeb(filename, &debDetail{
+	modifiedFilename, err = modifyDeb(filename, &debDetail{
 		url:       u,
 		jobDetail: detail,
 	})
-	if err != nil {
-		return err
-	}
-
-	err = sh.Command("sudo", "apt", "install", "-y",
-		"--allow-downgrades", "--reinstall", modifiedFilename).Run()
-	if err != nil {
-		return err
-	}
-
-	err = markInstall(pkgName)
-	return err
+	return
 }
 
 func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err error) {
@@ -654,6 +643,7 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 		return err
 	}
 
+	pkgUrlMap := make(map[string]*url.URL)
 	for _, debUrl := range debUrls {
 		base, err := getUrlBasename(debUrl)
 		if err != nil {
@@ -678,25 +668,58 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 		}
 
 		if respYes {
-			prDetail := new(pullRequestDetail)
-			prDetail.num = pr.GetNumber()
-			prDetail.repo = pr.GetBase().GetRepo().GetName()
-			prDetail.url = pr.GetHTMLURL()
-			prDetail.user = pr.GetUser().GetLogin()
-			prDetail.title = pr.GetTitle()
-			prDetail.state = pr.GetState()
-			jobDetail := &jobDetail{
-				url:      jobUrl,
-				prDetail: prDetail,
-			}
-			err = installDeb(debUrl, pkgName, jobDetail)
-			if err != nil {
-				return err
-			}
+			pkgUrlMap[pkgName] = debUrl
 		}
-
 	}
-	return nil
+
+	if len(pkgUrlMap) == 0 {
+		return nil
+	}
+
+	var files []string
+	for _, debUrl := range pkgUrlMap {
+		prDetail := new(pullRequestDetail)
+		prDetail.num = pr.GetNumber()
+		prDetail.repo = pr.GetBase().GetRepo().GetName()
+		prDetail.url = pr.GetHTMLURL()
+		prDetail.user = pr.GetUser().GetLogin()
+		prDetail.title = pr.GetTitle()
+		prDetail.state = pr.GetState()
+		jobDetail := &jobDetail{
+			url:      jobUrl,
+			prDetail: prDetail,
+		}
+		var filename string
+		filename, err = saveDeb(debUrl, jobDetail)
+		if err != nil {
+			return err
+		}
+		files = append(files, filename)
+	}
+
+	// simulate
+	cmdArgs := []string{"apt-get", "install", "-y",
+		"--allow-downgrades", "--reinstall", "-s"}
+	cmdArgs = append(cmdArgs, files...)
+	out, err := sh.Command("sudo", cmdArgs).CombinedOutput()
+	if err != nil {
+		log.Println("WARN: simulate install failed")
+		fmt.Printf("%s", out)
+		return err
+	}
+
+	for pkgName := range pkgUrlMap {
+		err = markInstall(pkgName)
+		if err != nil {
+			return err
+		}
+	}
+
+	cmdArgs = []string{"apt-get", "install", "-y",
+		"--allow-downgrades", "--reinstall"}
+	cmdArgs = append(cmdArgs, files...)
+	err = sh.Command("sudo", cmdArgs).Run()
+	return err
 }
 
 func showStatus() error {
