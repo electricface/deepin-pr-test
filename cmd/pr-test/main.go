@@ -692,29 +692,8 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 	return nil
 }
 
-const markDir = "/var/lib/deepin-pr-test"
-
-func markInstall(pkg string) error {
-	_, err := os.Stat(markDir)
-	if os.IsNotExist(err) {
-		err = sh.Command("sudo", "mkdir", "-p", "-m", "0755", markDir).Run()
-		if err != nil {
-			return err
-		}
-	} else if err != nil {
-		return err
-	}
-	err = sh.Command("sudo", "touch", filepath.Join(markDir, pkg)).Run()
-	return err
-}
-
-func markUninstall(pkg string) error {
-	// TODO
-	return nil
-}
-
 func showStatus() error {
-	all, err := getAllPkgInstallDetails()
+	all, _, err := getAllPkgInstallDetails()
 	if err != nil {
 		return err
 	}
@@ -730,7 +709,7 @@ func showStatus() error {
 	return nil
 }
 
-func getAllPkgInstallDetails() (allDetails map[string]map[string]string, err error) {
+func getAllPkgInstallDetails() (allDetails map[string]map[string]string, invalidList []string, err error) {
 	fileInfos, err := ioutil.ReadDir(markDir)
 	if err != nil {
 		return
@@ -741,7 +720,13 @@ func getAllPkgInstallDetails() (allDetails map[string]map[string]string, err err
 		var detail map[string]string
 		detail, err = getPkgInstallDetail(pkg)
 		if err != nil {
-			return
+			log.Println("WARN:", err)
+			err = nil
+		}
+		if len(detail) == 0 {
+			debugF("detail about %s is empty\n", pkg)
+			invalidList = append(invalidList, pkg)
+			continue
 		}
 
 		key := detail["CI_URL"]
@@ -805,24 +790,44 @@ func getPkgInstallDetail(pkg string) (detail map[string]string, err error) {
 }
 
 func restore(pattern string) error {
-	all, err := getAllPkgInstallDetails()
+	allDetail, invalidList, err := getAllPkgInstallDetails()
 	if err != nil {
 		return err
 	}
 
-	var pkgs string
-	for _, detail := range all {
+	var pkgList []string
+	for _, detail := range allDetail {
 		if pattern == "all" ||
 			detail["PR_REPO"] == pattern ||
 			detail["PR_USER"] == pattern {
 
-			pkgs = pkgs + " " + detail["pkgs"]
+			pkgListTemp := strings.Fields(detail["pkgs"])
+			pkgList = append(pkgList, pkgListTemp...)
 		}
 	}
-	fmt.Println("restore", pkgs)
+	debug("pkgList:", pkgList)
+	debug("invalidList:", invalidList)
 
-	// TODO mark uninstall
+	if len(pkgList) == 0 && len(invalidList) == 0 {
+		return nil
+	}
 
-	err = sh.Command("sh", "-c", "sudo apt-get install "+pkgs).Run()
+	if len(pkgList) > 0 {
+		fmt.Println("restore", pkgList)
+
+		cmdArgs := []string{"apt-get", "install", "--fix-missing"}
+		cmdArgs = append(cmdArgs, pkgList...)
+		err = sh.Command("sudo", cmdArgs).Run()
+		if err != nil {
+			return err
+		}
+	}
+
+	for _, pkg := range append(pkgList, invalidList...) {
+		err = markUninstall(pkg)
+		if err != nil {
+			return err
+		}
+	}
 	return err
 }

@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/user"
+	"path/filepath"
 
 	"github.com/codeskyblue/go-sh"
 )
@@ -60,4 +61,35 @@ func strSliceContains(slice []string, str string) bool {
 		}
 	}
 	return false
+}
+
+const markDir = "/var/lib/deepin-pr-test"
+
+func markInstall(pkg string) error {
+	_, err := os.Stat(markDir)
+	if os.IsNotExist(err) {
+		err = sh.Command("sudo", "mkdir", "-p", "-m", "0755", markDir).Run()
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+	err = sh.Command("sudo", "touch", filepath.Join(markDir, pkg)).Run()
+	return err
+}
+
+func markUninstall(pkg string) error {
+	debug("markUninstall", pkg)
+	filename := filepath.Join(markDir, pkg)
+	_, err := os.Stat(filename)
+	if err != nil {
+		debug(err)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	err = sh.Command("sudo", "rm", filename).Run()
+	return err
 }
