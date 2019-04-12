@@ -303,7 +303,12 @@ func main() {
 		}
 		prIds = append(prIds, ids...)
 	}
-	// TODO uniq prIds#
+	prIds = uniqPrIds(prIds)
+	prIdsStrList := make([]string, len(prIds))
+	for idx, id := range prIds {
+		prIdsStrList[idx] = id.String()
+	}
+	log.Println("found pull request:", strings.Join(prIdsStrList, ", "))
 	for _, prId := range prIds {
 		err = installPullRequest(client, prId)
 		if err != nil {
@@ -350,69 +355,57 @@ func getPrIdsWithIssue(client *github.Client, issueUrl string) ([]pullRequestId,
 	}
 
 	ctx := context.Background()
-	timeline, _, err := client.Issues.ListIssueTimeline(ctx, iId.owner, iId.repo, iId.num, &github.ListOptions{
-		PerPage: 100,
-	})
-	var repos []string
-	for _, timelineItem := range timeline {
-		if timelineItem.GetEvent() == "referenced" {
-			commitUrl := timelineItem.GetCommitURL()
-			repo := getRepoFromCommitUrl(commitUrl)
-			if repo != "" && !strSliceContains(repos, repo) {
-				repos = append(repos, repo)
+	page := 1
+	var prIds []pullRequestId
+	for {
+		timeline, resp, err := client.Issues.ListIssueTimeline(ctx, iId.owner, iId.repo, iId.num, &github.ListOptions{
+			Page:    page,
+			PerPage: 100,
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, timelineItem := range timeline {
+			if timelineItem.GetEvent() == "cross-referenced" {
+				src := timelineItem.GetSource()
+				if src.GetIssue() != nil &&
+					src.GetIssue().IsPullRequest() {
+					prLinks := src.GetIssue().GetPullRequestLinks()
+					prId, err := parsePullUrl(prLinks.GetHTMLURL())
+					if err == nil {
+						prIds = append(prIds, prId)
+					}
+				}
 			}
 		}
-	}
 
-	var prIds []pullRequestId
-	for _, repo := range repos {
-		prId, err := getPullRequestWithIssue(client, repo, issueUrl)
-		if err != nil {
-			log.Println("WARN:", err)
-			continue
+		if resp.NextPage == 0 {
+			break
 		}
-
-		if prId != nil {
-			prIds = append(prIds, *prId)
-		}
+		page = resp.NextPage
 	}
 	return prIds, nil
-}
-
-func getRepoFromCommitUrl(commitUrl string) string {
-	reg := regexp.MustCompile(`/([^/]+)/commits/`)
-	match := reg.FindStringSubmatch(commitUrl)
-	if match == nil {
-		return ""
-	}
-	return match[1]
-}
-
-func getPullRequestWithIssue(client *github.Client, repo, issueUrl string) (prId *pullRequestId, err error) {
-	ctx := context.Background()
-	pullRequests, _, err := client.PullRequests.List(ctx, organization, repo, &github.PullRequestListOptions{
-		State: "all",
-		ListOptions: github.ListOptions{
-			PerPage: 100,
-		},
-	})
-	if err != nil {
-		return
-	}
-	for _, pr := range pullRequests {
-		if strings.Contains(pr.GetBody(), issueUrl) {
-			return &pullRequestId{
-				repo: repo,
-				num:  pr.GetNumber(),
-			}, nil
-		}
-	}
-	return
 }
 
 type pullRequestId struct {
 	repo string
 	num  int
+}
+
+func (prId pullRequestId) String() string {
+	return fmt.Sprintf("%s#%d", prId.repo, prId.num)
+}
+
+func uniqPrIds(ids []pullRequestId) (result []pullRequestId) {
+	keys := make(map[pullRequestId]struct{})
+	for _, id := range ids {
+		if _, ok := keys[id]; !ok {
+			result = append(result, id)
+			keys[id] = struct{}{}
+		}
+	}
+	return
 }
 
 func getPRIdFromCmdArg(arg string) (pullRequestId, error) {
