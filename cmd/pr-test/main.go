@@ -33,11 +33,13 @@ var flagStatus bool
 var flagVerbose bool
 var flagRestore string
 var flagVersion bool
+var flagUpgradeSelf bool
 
 func init() {
 	flag.BoolVar(&flagStatus, "status", false, "")
 	flag.BoolVar(&flagVerbose, "verbose", false, "")
 	flag.BoolVar(&flagVersion, "version", false, "")
+	flag.BoolVar(&flagUpgradeSelf, "upgrade", false, "")
 	flag.StringVar(&flagRestore, "restore", "", "all|$repo|$user")
 }
 
@@ -274,6 +276,12 @@ func main() {
 		return
 	} else if flagVersion {
 		fmt.Println(VERSION)
+		return
+	} else if flagUpgradeSelf {
+		err := upgradeSelf()
+		if err != nil {
+			log.Fatal(err)
+		}
 		return
 	}
 
@@ -859,5 +867,37 @@ func restore(pattern string) error {
 			return err
 		}
 	}
+	return err
+}
+
+func upgradeSelf() error {
+	const scriptUrl = "https://raw.githubusercontent.com/electricface/deepin-pr-test/master/scripts/install.sh"
+	resp, err := grequests.Get(scriptUrl, nil)
+	if err != nil {
+		return err
+	}
+	scriptFilename := filepath.Join(os.TempDir(), "deepin-pr-test-install.sh")
+	debug("download install script from:", scriptUrl)
+	err = resp.DownloadToFile(scriptFilename)
+	if err != nil {
+		return err
+	}
+	err = os.Chmod(scriptFilename, 0777)
+	if err != nil {
+		return err
+	}
+	tempDir, err := ioutil.TempDir("", "deepin-pr-test-install")
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err := os.RemoveAll(tempDir)
+		if err != nil {
+			log.Println("WARN:", err)
+		}
+	}()
+
+	session := sh.NewSession().SetDir(tempDir)
+	err = session.Command(scriptFilename).Run()
 	return err
 }
