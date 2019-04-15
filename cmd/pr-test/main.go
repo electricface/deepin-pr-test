@@ -258,6 +258,31 @@ func modifyControl(filename string, detail *debDetail) error {
 	return nil
 }
 
+var globalClient *github.Client
+
+func getGithubClient() *github.Client {
+	if globalClient != nil {
+		return globalClient
+	}
+
+	token, err := getGithubAccessToken()
+	if err != nil {
+		log.Println("WARN: failed to get github access token:", err)
+	}
+
+	ctx := context.Background()
+	var httpClient *http.Client
+	if token != "" {
+		httpClient = oauth2.NewClient(ctx, oauth2.StaticTokenSource(
+			&oauth2.Token{
+				AccessToken: token,
+			}))
+	}
+	client := github.NewClient(httpClient)
+	globalClient = client
+	return client
+}
+
 func main() {
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
 	log.SetOutput(os.Stdout)
@@ -286,21 +311,7 @@ func main() {
 		return
 	}
 
-	token, err := getGithubAccessToken()
-	if err != nil {
-		log.Println("WARN: failed to get github access token:", err)
-	}
-
-	ctx := context.Background()
-	var httpClient *http.Client
-	if token != "" {
-		httpClient = oauth2.NewClient(ctx, oauth2.StaticTokenSource(
-			&oauth2.Token{
-				AccessToken: token,
-			}))
-	}
-	client := github.NewClient(httpClient)
-
+	client := getGithubClient()
 	var prIds []pullRequestId
 	for _, arg := range flag.Args() {
 		ids, err := getPrIdsFromCmdArg(client, arg)
@@ -316,7 +327,7 @@ func main() {
 	}
 	debug("found pull request:", strings.Join(prIdsStrList, ", "))
 	for _, prId := range prIds {
-		err = installPullRequest(client, prId)
+		err := installPullRequest(client, prId)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -900,7 +911,26 @@ func restore(pattern string) error {
 }
 
 func upgradeSelf() error {
-	const scriptUrl = "https://raw.githubusercontent.com/electricface/deepin-pr-test/master/scripts/install.sh"
+	const (
+		owner = "electricface"
+		repo  = "deepin-pr-test"
+	)
+
+	client := getGithubClient()
+	ctx := context.Background()
+	release, _, err := client.Repositories.GetReleaseByTag(ctx, owner, repo, "latest")
+	if err != nil {
+		return err
+	}
+
+	fmt.Println("latest release:", release.GetBody())
+	if strings.Contains(release.GetBody(), "version: "+VERSION) {
+		fmt.Println("already the latest version")
+		return nil
+	}
+
+	scriptUrl := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/master/scripts/install.sh",
+		owner, repo)
 	resp, err := grequests.Get(scriptUrl, nil)
 	if err != nil {
 		return err
