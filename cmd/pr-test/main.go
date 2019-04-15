@@ -16,6 +16,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -352,6 +353,24 @@ func getPrIdsFromCmdArg(client *github.Client, arg string) ([]pullRequestId, err
 	return []pullRequestId{id}, nil
 }
 
+var globalPRCache = make(map[pullRequestId]*github.PullRequest)
+
+func getPullRequest(client *github.Client, repo string, num int) (*github.PullRequest, error) {
+	pr := globalPRCache[pullRequestId{repo: repo, num: num}]
+	if pr != nil {
+		return pr, nil
+	}
+
+	ctx := context.Background()
+	pr, _, err := client.PullRequests.Get(ctx, organization, repo, num)
+	if err != nil {
+		return nil, err
+	}
+
+	globalPRCache[pullRequestId{repo: repo, num: num}] = pr
+	return pr, nil
+}
+
 func getPrIdsWithIssue(client *github.Client, issueUrl string) ([]pullRequestId, error) {
 	iId, err := parseIssueUrl(issueUrl)
 	if err != nil {
@@ -377,9 +396,19 @@ func getPrIdsWithIssue(client *github.Client, issueUrl string) ([]pullRequestId,
 					src.GetIssue().IsPullRequest() {
 					prLinks := src.GetIssue().GetPullRequestLinks()
 					prId, err := parsePullUrl(prLinks.GetHTMLURL())
-					if err == nil {
-						prIds = append(prIds, prId)
+					if err != nil {
+						continue
 					}
+
+					pr, err := getPullRequest(client, prId.repo, prId.num)
+					if err != nil {
+						return nil, err
+					}
+					if pr.GetState() == "closed" && !pr.GetMerged() {
+						debug("ignore abandoned:", prId.String())
+						continue
+					}
+					prIds = append(prIds, prId)
 				}
 			}
 		}
@@ -402,12 +431,15 @@ func (prId pullRequestId) String() string {
 }
 
 func uniqPrIds(ids []pullRequestId) (result []pullRequestId) {
-	keys := make(map[pullRequestId]struct{})
+	repoNumsMap := make(map[string][]int)
 	for _, id := range ids {
-		if _, ok := keys[id]; !ok {
-			result = append(result, id)
-			keys[id] = struct{}{}
-		}
+		repoNumsMap[id.repo] = append(repoNumsMap[id.repo], id.num)
+	}
+
+	for repo, nums := range repoNumsMap {
+		sort.Ints(nums)
+		num := nums[len(nums)-1]
+		result = append(result, pullRequestId{repo: repo, num: num})
 	}
 	return
 }
@@ -569,14 +601,11 @@ func parseDebFilename(filename string) (pkgName, version, arch string, err error
 }
 
 func showPullRequestInfo(prId pullRequestId, pr *github.PullRequest) {
-	title := pr.GetTitle()
-	state := pr.GetState()
-	user := pr.GetUser().GetLogin()
-
 	fmt.Printf("> %s #%d\n", prId.repo, prId.num)
-	fmt.Println("title:", title)
-	fmt.Println("state:", state)
-	fmt.Println("user:", user)
+	fmt.Println("title:", pr.GetTitle())
+	fmt.Println("state:", pr.GetState())
+	fmt.Println("merged:", pr.GetMerged())
+	fmt.Println("user:", pr.GetUser().GetLogin())
 }
 
 type debDetail struct {
@@ -599,7 +628,7 @@ type pullRequestDetail struct {
 
 func installPullRequest(client *github.Client, prId pullRequestId) error {
 	ctx := context.Background()
-	pr, _, err := client.PullRequests.Get(ctx, organization, prId.repo, prId.num)
+	pr, err := getPullRequest(client, prId.repo, prId.num)
 	if err != nil {
 		return err
 	}
