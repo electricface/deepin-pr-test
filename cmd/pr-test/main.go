@@ -199,6 +199,14 @@ func modifyControl(filename string, detail *debDetail) error {
 	}
 
 	srcParagraph := ctl.Source
+	pkgName := srcParagraph.Values["Package"]
+	newVer, err := getNewVersion(pkgName)
+	if err != nil {
+		log.Printf("WARN: failed to get new version for %s: %v\n", pkgName, err)
+	}
+	if newVer != "" {
+		srcParagraph.Set("Version", newVer)
+	}
 
 	var descBuf bytes.Buffer
 	descBuf.WriteString(srcParagraph.Description)
@@ -685,6 +693,21 @@ func installPullRequest(client *github.Client, prId pullRequestId) error {
 	return err
 }
 
+func needDefaultInstall(pkgName string) bool {
+	if strings.HasSuffix(pkgName, "-dev") ||
+		strings.HasSuffix(pkgName, "-dbg") ||
+		strings.HasSuffix(pkgName, "-dbgsym") {
+		return false
+	}
+
+	switch pkgName {
+	case "libdtkwidget-bin":
+		return false
+	}
+
+	return true
+}
+
 func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 	debUrls, err := getDebUrls(jobUrl)
 	if err != nil {
@@ -703,13 +726,7 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 			return err
 		}
 
-		defaultYes := true
-		if strings.HasSuffix(pkgName, "-dev") ||
-			strings.HasSuffix(pkgName, "-dbg") ||
-			strings.HasSuffix(pkgName, "-dbgsym") {
-			defaultYes = false
-		}
-
+		defaultYes := needDefaultInstall(pkgName)
 		respYes, err := askYesNo(fmt.Sprintf("install %s?", pkgName), defaultYes)
 		if err != nil {
 			return err
@@ -746,14 +763,22 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 	}
 
 	// simulate
-	cmdArgs := []string{"apt-get", "install", "-y",
-		"--allow-downgrades", "--reinstall", "-s"}
+	commonCmdArgs := []string{"apt-get", "install", "-y",
+		"--allow-downgrades", "--reinstall"}
+	cmdArgs := append(commonCmdArgs, "-s")
 	cmdArgs = append(cmdArgs, files...)
-	out, err := sh.Command("sudo", cmdArgs).CombinedOutput()
+	err = sh.Command("sudo", cmdArgs).Run()
 	if err != nil {
-		log.Println("WARN: simulate install failed")
-		fmt.Printf("%s", out)
+		log.Println("WARN: simulate install failed:", err)
 		return err
+	}
+
+	replyYes, err := askYesNo("Do you want to continue?", true)
+	if err != nil {
+		return err
+	}
+	if !replyYes {
+		return nil
 	}
 
 	for pkgName := range pkgUrlMap {
@@ -763,9 +788,7 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 		}
 	}
 
-	cmdArgs = []string{"apt-get", "install", "-y",
-		"--allow-downgrades", "--reinstall"}
-	cmdArgs = append(cmdArgs, files...)
+	cmdArgs = append(commonCmdArgs, files...)
 	err = sh.Command("sudo", cmdArgs).Run()
 	return err
 }
@@ -959,4 +982,36 @@ func upgradeSelf() error {
 	session := sh.NewSession().SetDir(tempDir)
 	err = session.Command(scriptFilename).Run()
 	return err
+}
+
+func getNewVersion(pkgName string) (string, error) {
+	out, err := sh.Command("env", "LC_ALL=C", "apt-cache", "policy", pkgName).Output()
+	if err != nil {
+		return "", err
+	}
+	/*
+		输出类似于
+
+		bash:
+		  Installed: 4.4.18-2+b1
+		  Candidate: 4.4.18-2+b1
+	*/
+	lines := bytes.Split(out, []byte{'\n'})
+
+	getVal := func(line []byte) string {
+		fields := bytes.Fields(bytes.TrimSpace(line))
+		if len(fields) < 2 {
+			return ""
+		}
+		return string(fields[1])
+	}
+
+	installedVer := getVal(lines[1])
+	candidateVer := getVal(lines[2])
+
+	if candidateVer != "" && installedVer == "(none)" {
+		return candidateVer, nil
+	}
+
+	return installedVer, nil
 }
