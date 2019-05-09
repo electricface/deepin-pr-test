@@ -26,6 +26,7 @@ import (
 	"github.com/levigross/grequests"
 	"golang.org/x/oauth2"
 	"pault.ag/go/debian/control"
+	"pault.ag/go/debian/dependency"
 )
 
 var VERSION = "unknown"
@@ -192,27 +193,55 @@ func modifyDeb(filename string, detail *debDetail) (modifiedFilename string, err
 	return
 }
 
+func replaceDependsVersion(d dependency.Dependency, oldVer, newVer string) string {
+	for _, r := range d.Relations {
+		for pIdx := range r.Possibilities {
+			ver := r.Possibilities[pIdx].Version
+			if ver != nil && ver.Number == oldVer {
+				r.Possibilities[pIdx].Version.Number = newVer
+			}
+		}
+	}
+	return d.String()
+}
+
 func modifyControl(filename string, detail *debDetail) error {
-	ctl, err := control.ParseControlFile(filename)
+	fh, err := os.Open(filename)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		err := fh.Close()
+		if err != nil {
+			log.Println("WARN: failed to close file:", err)
+		}
+	}()
+	br := bufio.NewReader(fh)
+
+	var binParagraph control.BinaryParagraph
+	err = control.Unmarshal(&binParagraph, br)
 	if err != nil {
 		return err
 	}
 
-	srcParagraph := ctl.Source
-	pkgName := srcParagraph.Values["Package"]
+	pkgName := binParagraph.Package
+	oldVer := binParagraph.Values["Version"]
+	oldDepends := binParagraph.Values["Depends"]
 	newVer, err := getNewVersion(pkgName)
 	if err != nil {
 		log.Printf("WARN: failed to get new version for %s: %v\n", pkgName, err)
 	}
 	if newVer != "" {
-		srcParagraph.Set("Version", newVer)
+		binParagraph.Set("Version", newVer)
+		binParagraph.Set("Depends", replaceDependsVersion(binParagraph.Depends, oldVer, newVer))
 	}
 
 	var descBuf bytes.Buffer
-	descBuf.WriteString(srcParagraph.Description)
+	descBuf.WriteString(binParagraph.Description)
 	descBuf.WriteString("The following information is added by deepin-pr-test\n=begin\n")
 	prDetail := detail.jobDetail.prDetail
 	parts := []string{
+		"DEPENDS", oldDepends,
 		"PR_URL", prDetail.url,
 		"PR_REPO", prDetail.repo,
 		"PR_NUM", strconv.Itoa(prDetail.num),
@@ -233,7 +262,7 @@ func modifyControl(filename string, detail *debDetail) error {
 	}
 	// NOTE: paragraph 的 Description 不能以 \n 结尾。
 	descBuf.WriteString("=end")
-	srcParagraph.Set("Description", descBuf.String())
+	binParagraph.Set("Description", descBuf.String())
 
 	f, err := os.Create(filename)
 	if err != nil {
@@ -247,7 +276,7 @@ func modifyControl(filename string, detail *debDetail) error {
 	}()
 
 	bw := bufio.NewWriter(f)
-	err = srcParagraph.WriteTo(bw)
+	err = binParagraph.WriteTo(bw)
 	if err != nil {
 		return err
 	}
@@ -257,7 +286,7 @@ func modifyControl(filename string, detail *debDetail) error {
 	}
 
 	if flagVerbose {
-		err = srcParagraph.WriteTo(os.Stdout)
+		err = binParagraph.WriteTo(os.Stdout)
 		if err != nil {
 			return err
 		}
