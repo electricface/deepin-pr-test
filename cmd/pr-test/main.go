@@ -945,7 +945,7 @@ func restore(pattern string) error {
 	if len(pkgList) > 0 {
 		fmt.Println("restore", pkgList)
 
-		cmdArgs := []string{"apt-get", "install", "--fix-missing"}
+		cmdArgs := []string{"apt-get", "install", "--fix-missing", "-y"}
 		cmdArgs = append(cmdArgs, pkgList...)
 		err = sh.Command("sudo", cmdArgs).Run()
 		if err != nil {
