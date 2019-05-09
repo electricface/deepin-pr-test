@@ -945,7 +945,7 @@ func restore(pattern string) error {
 	if len(pkgList) > 0 {
 		fmt.Println("restore", pkgList)
 
-		cmdArgs := []string{"apt-get", "install", "--fix-missing", "-y"}
+		cmdArgs := []string{"apt-get", "install", "--fix-missing", "-y", "--reinstall"}
 		cmdArgs = append(cmdArgs, pkgList...)
 		err = sh.Command("sudo", cmdArgs).Run()
 		if err != nil {
@@ -954,9 +954,19 @@ func restore(pattern string) error {
 	}
 
 	for _, pkg := range append(pkgList, invalidList...) {
-		err = markUninstall(pkg)
+		detail, err := getPkgInstallDetail(pkg)
 		if err != nil {
-			return err
+			log.Println("WARN:", err)
+		}
+
+		if len(detail) == 0 {
+			// restore success
+			err = markUninstall(pkg)
+			if err != nil {
+				return err
+			}
+		} else {
+			log.Println("WARN: failed to restore", pkg)
 		}
 	}
 	return err
