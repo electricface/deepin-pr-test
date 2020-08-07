@@ -5,10 +5,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 
-	"github.com/codeskyblue/go-sh"
+	sh "github.com/codeskyblue/go-sh"
 )
 
 func debug(v ...interface{}) {
@@ -92,4 +93,27 @@ func markUninstall(pkg string) error {
 	}
 	err = sh.Command("sudo", "rm", filename).Run()
 	return err
+}
+
+var _dpkgArchCache string
+
+func getDpkgArch() (string, error) {
+	if _dpkgArchCache != "" {
+		return _dpkgArchCache, nil
+	}
+	arch, err := getDpkgArchAux()
+	if err != nil {
+		return "", err
+	}
+	_dpkgArchCache = arch
+	return arch, nil
+}
+
+func getDpkgArchAux() (string, error) {
+	out, err := exec.Command("dpkg", "--print-architecture").Output()
+	if err != nil {
+		return "", err
+	}
+	arch := string(bytes.TrimSpace(out))
+	return arch, nil
 }

@@ -21,7 +21,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/codeskyblue/go-sh"
+	sh "github.com/codeskyblue/go-sh"
 	"github.com/google/go-github/github"
 	"github.com/levigross/grequests"
 	"golang.org/x/oauth2"
@@ -239,12 +239,12 @@ func modifyControl(filename string, detail *debDetail) error {
 	var descBuf bytes.Buffer
 	descBuf.WriteString(binParagraph.Description)
 	descBuf.WriteString("The following information is added by deepin-pr-test\n=begin\n")
-	prDetail := detail.jobDetail.prDetail
+	prDetail := detail.jobDetail.detail
 	parts := []string{
 		"DEPENDS", oldDepends,
 		"PR_URL", prDetail.url,
-		"PR_REPO", prDetail.repo,
-		"PR_NUM", strconv.Itoa(prDetail.num),
+		//"PR_REPO", prDetail.repo,
+		//"PR_NUM", strconv.Itoa(prDetail.num),
 		"PR_USER", prDetail.user,
 		"PR_TITLE", prDetail.title,
 		"PR_STATE", prDetail.state,
@@ -348,26 +348,41 @@ func main() {
 		return
 	}
 
-	client := getGithubClient()
-	var prIds []pullRequestId
-	for _, arg := range flag.Args() {
-		ids, err := getPrIdsFromCmdArg(client, arg)
-		if err != nil {
-			log.Fatal(err)
-		}
-		prIds = append(prIds, ids...)
+	// TODO
+	//client := getGithubClient()
+	//var prIds []pullRequestId
+	//for _, arg := range flag.Args() {
+	//	ids, err := getPrIdsFromCmdArg(client, arg)
+	//	if err != nil {
+	//		log.Fatal(err)
+	//	}
+	//	prIds = append(prIds, ids...)
+	//}
+	//prIds = uniqPrIds(prIds)
+	//prIdsStrList := make([]string, len(prIds))
+	//for idx, id := range prIds {
+	//	prIdsStrList[idx] = id.String()
+	//}
+	//debug("found pull request:", strings.Join(prIdsStrList, ", "))
+	//for _, prId := range prIds {
+	//	err := installPullRequest(client, prId)
+	//	if err != nil {
+	//		log.Fatal(err)
+	//	}
+	//}
+
+	client, err := newGerritClient()
+	if err != nil {
+		log.Fatal(err)
 	}
-	prIds = uniqPrIds(prIds)
-	prIdsStrList := make([]string, len(prIds))
-	for idx, id := range prIds {
-		prIdsStrList[idx] = id.String()
+	changeID := flag.Args()[0]
+	jobUrl, detail, err := getJobUrlFromGerritChange(client, changeID)
+	if err != nil {
+		log.Fatal(err)
 	}
-	debug("found pull request:", strings.Join(prIdsStrList, ", "))
-	for _, prId := range prIds {
-		err := installPullRequest(client, prId)
-		if err != nil {
-			log.Fatal(err)
-		}
+	err = installJobDebs(jobUrl, detail)
+	if err != nil {
+		log.Fatal(err)
 	}
 }
 
@@ -662,8 +677,8 @@ type debDetail struct {
 }
 
 type jobDetail struct {
-	url      string
-	prDetail *pullRequestDetail
+	url    string
+	detail *patchDetail
 }
 
 type pullRequestDetail struct {
@@ -718,7 +733,15 @@ func installPullRequest(client *github.Client, prId pullRequestId) error {
 
 	debug("targetUrl:", targetUrl)
 
-	err = installJobDebs(strings.TrimSuffix(targetUrl, "/console"), pr)
+	detail := &patchDetail{
+		id:    strconv.Itoa(int(pr.GetID())),
+		url:   pr.GetHTMLURL(),
+		user:  pr.GetUser().GetLogin(),
+		title: pr.GetTitle(),
+		state: pr.GetState(),
+	}
+	jobUrl := strings.TrimSuffix(targetUrl, "/console")
+	err = installJobDebs(jobUrl, detail)
 	return err
 }
 
@@ -737,7 +760,15 @@ func needDefaultInstall(pkgName string) bool {
 	return true
 }
 
-func installJobDebs(jobUrl string, pr *github.PullRequest) error {
+type patchDetail struct {
+	id    string
+	url   string
+	user  string
+	title string
+	state string
+}
+
+func installJobDebs(jobUrl string, detail *patchDetail) error {
 	debUrls, err := getDebUrls(jobUrl)
 	if err != nil {
 		return err
@@ -750,9 +781,16 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 			return err
 		}
 
-		pkgName, _, _, err := parseDebFilename(base)
+		pkgName, _, arch, err := parseDebFilename(base)
 		if err != nil {
 			return err
+		}
+		hostArch, err := getDpkgArch()
+		if err != nil {
+			return err
+		}
+		if hostArch != arch {
+			continue
 		}
 
 		defaultYes := needDefaultInstall(pkgName)
@@ -772,16 +810,10 @@ func installJobDebs(jobUrl string, pr *github.PullRequest) error {
 
 	var files []string
 	for _, debUrl := range pkgUrlMap {
-		prDetail := new(pullRequestDetail)
-		prDetail.num = pr.GetNumber()
-		prDetail.repo = pr.GetBase().GetRepo().GetName()
-		prDetail.url = pr.GetHTMLURL()
-		prDetail.user = pr.GetUser().GetLogin()
-		prDetail.title = pr.GetTitle()
-		prDetail.state = pr.GetState()
 		jobDetail := &jobDetail{
-			url:      jobUrl,
-			prDetail: prDetail,
+			url: jobUrl,
+			//prDetail: prDetail,
+			detail: detail,
 		}
 		var filename string
 		filename, err = saveDeb(debUrl, jobDetail)
@@ -854,7 +886,7 @@ func getAllPkgInstallDetails() (allDetails map[string]map[string]string, invalid
 			err = nil
 		}
 		if len(detail) == 0 {
-			debugF("detail about %s is empty\n", pkg)
+			debugF("patchDetail about %s is empty\n", pkg)
 			invalidList = append(invalidList, pkg)
 			continue
 		}
