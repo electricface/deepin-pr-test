@@ -375,7 +375,12 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	changeID := flag.Args()[0]
+	args := flag.Args()
+	if len(args) != 1 {
+		log.Println("usage pr-test NUM")
+		os.Exit(1)
+	}
+	changeID := args[0]
 	jobUrl, detail, err := getJobUrlFromGerritChange(client, changeID)
 	if err != nil {
 		log.Fatal(err)
@@ -452,29 +457,30 @@ func getPrIdsWithIssue(client *github.Client, issueUrl string) ([]pullRequestId,
 			return nil, err
 		}
 
-		for _, timelineItem := range timeline {
-			if timelineItem.GetEvent() == "cross-referenced" {
-				src := timelineItem.GetSource()
-				if src.GetIssue() != nil &&
-					src.GetIssue().IsPullRequest() {
-					prLinks := src.GetIssue().GetPullRequestLinks()
-					prId, err := parsePullUrl(prLinks.GetHTMLURL())
-					if err != nil {
-						continue
-					}
-
-					pr, err := getPullRequest(client, prId.repo, prId.num)
-					if err != nil {
-						return nil, err
-					}
-					if pr.GetState() == "closed" && !pr.GetMerged() {
-						debug("ignore abandoned:", prId.String())
-						continue
-					}
-					prIds = append(prIds, prId)
-				}
-			}
-		}
+		_ = timeline
+		//for _, timelineItem := range timeline {
+		//	if timelineItem.GetEvent() == "cross-referenced" {
+		//		src := timelineItem.GetSource()
+		//		if src.GetIssue() != nil &&
+		//			src.GetIssue().IsPullRequest() {
+		//			prLinks := src.GetIssue().GetPullRequestLinks()
+		//			prId, err := parsePullUrl(prLinks.GetHTMLURL())
+		//			if err != nil {
+		//				continue
+		//			}
+		//
+		//			pr, err := getPullRequest(client, prId.repo, prId.num)
+		//			if err != nil {
+		//				return nil, err
+		//			}
+		//			if pr.GetState() == "closed" && !pr.GetMerged() {
+		//				debug("ignore abandoned:", prId.String())
+		//				continue
+		//			}
+		//			prIds = append(prIds, prId)
+		//		}
+		//	}
+		//}
 
 		if resp.NextPage == 0 {
 			break
